@@ -198,6 +198,7 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
     uid = update.effective_user.id
     try:
         data = json.loads(update.message.web_app_data.data)
+        # Поддерживаем оба формата: {arcane: N} и {action: 'buy_mission', arcane: N}
         arc  = int(data.get('arcane', 0))
         if 1 <= arc <= 22:
             db_save_arcane(uid, arc)
