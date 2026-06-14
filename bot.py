@@ -1,8 +1,10 @@
 """
 Бот Светланы — Кармическая Звезда
+Воронка: калькулятор → оплата → видео → допродажи
 """
 
-import os, logging, threading, sqlite3, requests, json, uuid
+import os, logging, threading, sqlite3, requests, json, uuid, time
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -27,11 +29,13 @@ PRICE           = 990
 PRODUCT_NAME    = 'Видео про Миссию Души'
 ADMIN_IDS       = [275673546]
 
+# ═══ НАСТРОЙКИ ДОПРОДАЖ ═══
+FOLLOWUP_UNPAID_HOURS    = 3      # дожим неоплативших — через 3 часа
+CONSULT_AFTER_DAYS       = 5      # продажа консультации — через 5 дней
+CONSULT_PRICE            = 7900   # цена консультации
+CONSULT_CONTACT          = 'https://t.me/LanaTryamkina'  # контакт Светланы для записи
+
 # ═══ ССЫЛКИ НА ВИДЕО ═══
-# Как заполнить:
-# 1. Отправь видео/PDF боту в личку
-# 2. Бот пришлёт file_id
-# 3. Вставь file_id сюда
 MISSION_VIDEOS = {
     1:  ('', ''),
     2:  ('', ''),
@@ -62,15 +66,32 @@ log = logging.getLogger(__name__)
 
 DB = 'bot.db'
 
+def now_ts():
+    return int(time.time())
+
 def init_db():
     with sqlite3.connect(DB) as c:
         c.execute('''CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, arcane INTEGER,
-            phone TEXT, payment_id TEXT, paid INTEGER DEFAULT 0)''')
+            phone TEXT, payment_id TEXT, paid INTEGER DEFAULT 0,
+            offer_ts INTEGER DEFAULT 0,
+            paid_ts INTEGER DEFAULT 0,
+            followup_sent INTEGER DEFAULT 0,
+            consult_sent INTEGER DEFAULT 0)''')
+    # Миграция: добавляем колонки если база старая
+    with sqlite3.connect(DB) as c:
+        cols = [r[1] for r in c.execute("PRAGMA table_info(users)").fetchall()]
+        for col, default in [('offer_ts','0'),('paid_ts','0'),
+                             ('followup_sent','0'),('consult_sent','0')]:
+            if col not in cols:
+                c.execute(f'ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT {default}')
 
 def db_save_arcane(uid, arc):
     with sqlite3.connect(DB) as c:
-        c.execute('INSERT OR REPLACE INTO users (user_id,arcane,paid) VALUES(?,?,0)', (uid,arc))
+        # Сохраняем аркан и время показа оффера, сбрасываем флаги
+        c.execute('''INSERT OR REPLACE INTO users
+            (user_id,arcane,paid,offer_ts,followup_sent,consult_sent)
+            VALUES(?,?,0,?,0,0)''', (uid, arc, now_ts()))
 
 def db_save_phone(uid, ph):
     with sqlite3.connect(DB) as c:
@@ -90,7 +111,7 @@ def db_find_by_payment(pid):
 
 def db_mark_paid(uid):
     with sqlite3.connect(DB) as c:
-        c.execute('UPDATE users SET paid=1 WHERE user_id=?',(uid,))
+        c.execute('UPDATE users SET paid=1, paid_ts=? WHERE user_id=?',(now_ts(), uid))
 
 def create_yukassa_payment(amount, description, phone, user_id):
     digits = ''.join(filter(str.isdigit, str(phone)))
@@ -123,7 +144,10 @@ def create_yukassa_payment(amount, description, phone, user_id):
     return None, None
 
 def send_tg(method, data):
-    requests.post(f'https://api.telegram.org/bot{BOT_TOKEN}/{method}', json=data, timeout=30)
+    try:
+        requests.post(f'https://api.telegram.org/bot{BOT_TOKEN}/{method}', json=data, timeout=30)
+    except Exception as e:
+        log.error(f"send_tg error: {e}")
 
 def deliver_video(user_id, arcane):
     video_id, pdf_id = MISSION_VIDEOS.get(arcane, ('',''))
@@ -141,6 +165,89 @@ def deliver_video(user_id, arcane):
                 "Если появятся вопросы — просто напиши сюда ✦"})
     log.info(f"Видео выдано: user={user_id}, arcane={arcane}")
 
+# ═══════════════════════════════════════════
+# ПЛАНИРОВЩИК ДОПРОДАЖ
+# ═══════════════════════════════════════════
+def followup_unpaid(uid, arcane):
+    """Дожим тех, кто увидел оффер но не оплатил."""
+    deep = f"https://t.me/numerolog_svetlana_bot?start=mission_{arcane}"
+    send_tg('sendMessage', {
+        'chat_id': uid,
+        'text': f"Я заметила, что ты не досмотрела свою Миссию...\n\n"
+                f"Аркан {arcane} — это сильная энергия. "
+                f"В видео я объясняю, почему именно у тебя "
+                f"такие повторяющиеся сценарии в жизни — "
+                f"и что с этим делать.\n\n"
+                f"Это всего 12 минут, которые могут многое прояснить ✦",
+        'reply_markup': json.dumps({
+            'inline_keyboard': [[
+                {'text': f'Получить видео — {PRICE} ₽',
+                 'url': deep}
+            ]]
+        })
+    })
+    log.info(f"Дожим отправлен: user={uid}, arcane={arcane}")
+
+def offer_consultation(uid, arcane):
+    """Продажа личной консультации через несколько дней после покупки."""
+    send_tg('sendMessage', {
+        'chat_id': uid,
+        'text': f"Привет ✦\n\n"
+                f"Надеюсь, видео про Аркан {arcane} откликнулось.\n\n"
+                f"Я думала о твоей Звезде после расчёта. "
+                f"Видео про миссию — это контур, общая картина.\n\n"
+                f"В личном разборе я смотрю глубже: почему именно "
+                f"у тебя такие паттерны в деньгах и отношениях, "
+                f"в каком жизненном периоде ты сейчас, "
+                f"и что это значит конкретно для тебя.\n\n"
+                f"Это час работы со мной лично — голосом, "
+                f"с разбором всех сфер и ответами на твои вопросы.\n\n"
+                f"Если откликается — напиши мне, расскажу подробнее ✦",
+        'reply_markup': json.dumps({
+            'inline_keyboard': [[
+                {'text': 'Узнать про личный разбор',
+                 'url': CONSULT_CONTACT}
+            ]]
+        })
+    })
+    log.info(f"Оффер консультации отправлен: user={uid}, arcane={arcane}")
+
+def scheduler_loop():
+    """
+    Фоновый цикл — каждые 10 минут проверяет базу
+    и отправляет отложенные сообщения.
+    """
+    while True:
+        try:
+            ts = now_ts()
+            with sqlite3.connect(DB) as c:
+                # 1. ДОЖИМ неоплативших (прошло FOLLOWUP_UNPAID_HOURS, не оплатил, дожим не отправлен)
+                unpaid = c.execute('''
+                    SELECT user_id, arcane FROM users
+                    WHERE paid=0 AND followup_sent=0
+                    AND offer_ts>0 AND ?-offer_ts >= ?
+                ''', (ts, FOLLOWUP_UNPAID_HOURS*3600)).fetchall()
+                for uid, arc in unpaid:
+                    followup_unpaid(uid, arc)
+                    c.execute('UPDATE users SET followup_sent=1 WHERE user_id=?', (uid,))
+
+                # 2. КОНСУЛЬТАЦИЯ оплатившим (прошло CONSULT_AFTER_DAYS, оплатил, оффер не отправлен)
+                paid = c.execute('''
+                    SELECT user_id, arcane FROM users
+                    WHERE paid=1 AND consult_sent=0
+                    AND paid_ts>0 AND ?-paid_ts >= ?
+                ''', (ts, CONSULT_AFTER_DAYS*86400)).fetchall()
+                for uid, arc in paid:
+                    offer_consultation(uid, arc)
+                    c.execute('UPDATE users SET consult_sent=1 WHERE user_id=?', (uid,))
+        except Exception as e:
+            log.error(f"Scheduler error: {e}")
+
+        time.sleep(600)  # пауза 10 минут
+
+# ═══════════════════════════════════════════
+# ОБРАБОТЧИКИ БОТА
+# ═══════════════════════════════════════════
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     name = update.effective_user.first_name or ''
@@ -198,7 +305,6 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
     uid = update.effective_user.id
     try:
         data = json.loads(update.message.web_app_data.data)
-        # Поддерживаем оба формата: {arcane: N} и {action: 'buy_mission', arcane: N}
         arc  = int(data.get('arcane', 0))
         if 1 <= arc <= 22:
             db_save_arcane(uid, arc)
@@ -207,18 +313,17 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
         log.error(f"WebApp error: {e}")
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Для Светланы/Сергея — получить file_id отправленного файла."""
     uid = update.effective_user.id
     if uid not in ADMIN_IDS:
         return
     msg = update.message
     if msg.video:
         fid = msg.video.file_id
-        await msg.reply_text(f"📹 VIDEO file\_id:\n`{fid}`", parse_mode='Markdown')
+        await msg.reply_text(f"📹 VIDEO file\\_id:\n`{fid}`", parse_mode='Markdown')
     elif msg.document:
         fid  = msg.document.file_id
         name = msg.document.file_name or 'файл'
-        await msg.reply_text(f"📄 DOCUMENT file\_id \({name}\):\n`{fid}`", parse_mode='Markdown')
+        await msg.reply_text(f"📄 DOCUMENT file\\_id \\({name}\\):\n`{fid}`", parse_mode='Markdown')
 
 flask_app = Flask(__name__)
 
@@ -252,6 +357,9 @@ def main():
     init_db()
     threading.Thread(target=run_flask, daemon=True).start()
     log.info(f"Flask на порту {PORT}")
+    # Запускаем планировщик допродаж
+    threading.Thread(target=scheduler_loop, daemon=True).start()
+    log.info("Планировщик допродаж запущен")
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
