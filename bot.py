@@ -159,9 +159,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Нажми кнопку ниже — я рассчитаю "
         "твою Кармическую Звезду по дате рождения.\n\n"
         "Бесплатно. Займёт 1 минуту ✦",
-        reply_markup=ReplyKeyboardMarkup([[
-            KeyboardButton("✦ Открыть калькулятор", web_app=WebAppInfo(url=WEBAPP_URL))
-        ]], resize_keyboard=True))
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("Открыть калькулятор ✦", web_app=WebAppInfo(url=WEBAPP_URL))
+        ]]))
 
 async def send_offer(update, arcane):
     await update.message.reply_text(
