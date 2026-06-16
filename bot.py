@@ -271,7 +271,7 @@ NURTURE_DAY4 = {
 logging.basicConfig(format='%(asctime)s [%(levelname)s] %(message)s', level=logging.INFO)
 log = logging.getLogger(__name__)
 
-DB = 'bot.db'
+DB = os.getenv('DB_PATH', 'bot.db')
 
 def now_ts():
     return int(time.time())
