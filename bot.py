@@ -718,8 +718,8 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Видео про Аркан {arcane} плюс PDF практика ✦\n\n"
         f"Стоимость: {PRICE} ₽\n\n"
         f"После оплаты видео придёт сюда автоматически.\n\n"
-        f"💬 «Я неверующая Фома, но там попадание на 100%. "
-        f"Столько ответов нашла на свои вопросы». Оксана, 42 года",
+        f"💬 «Не верила в это совсем. Но когда Светлана начала читать, "
+        f"не поверила своим ушам, попадание на 100%». Оксана, 42 года",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"Оплатить {PRICE} ₽ →", url=url)]]))
 
 async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
